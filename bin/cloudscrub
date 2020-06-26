@@ -1,0 +1,331 @@
+#!/usr/bin/env ruby
+
+require 'bundler/setup'
+require 'logger'
+require 'optionparser'
+require 'cloudscrub'
+
+def main
+  options = {}
+
+  # Defaults
+  options[:local_dir] = '.'
+  options[:log_level] = Logger::INFO
+  options[:dry_run] = false
+
+  optparse = OptionParser.new do |opts|
+    opts.banner = <<-EOM
+usage: #{File.basename($0)} [OPTIONS] LOG_GROUP_NAME
+
+Download all CloudWatch Logs for the specified time window from the specified log group,
+and upload them to LOG_BUCKET_NAME, delete the original log stream, then re-upload
+to CloudWatch.
+
+The current working directory will be used for temporary storage of the log
+files, which may be very large!
+
+Filtering is applied per-log line.  Only one regex filter may be specified and should
+be in the form of a search/replace.  Due to the flexibility of PCRE, this should cover most
+scrubbing scenarios.  Multiple JSON Path filters may be specified.  If a JSON Path filter
+is set the log line will be parsed as JSON and all elements mathing a JSON Path filter
+will be removed from the output.
+
+For example:
+  # Download logs from prod events.log between 2018-09-21 and 2018-10-10,
+  # split them into 5 MiB chunks, and then upload them to S3 under
+  # s3://login-gov-prod-logs/imported_from_cloudwatch_logs/events.log/.
+  # Don't delete them afterwards in case it's useful to go through thcs.
+  #{File.basename($0)} -s 1537574400 -e 1539214898 --split-bytes 5242880 --skip-delete -g prod_/srv/idp/shared/log/events.log -a login-gov-prod-logs
+
+  # Download logs from prod events.log between 2018-09-21 and 2018-10-10, but
+  # keep them locally and don't upload them to S3 or reimport streams.
+  # This is useful if the files need to be manually split before uploading.
+  #{File.basename($0)} -s 1537574400 -e 1539214898 --dry-run --skip-delete prod_/srv/idp/shared/log/events.log login-gov-prod-logs
+
+  # Download logs from prod events.log between 2018-09-21 and 2018-10-10, but
+  # keep them locally and don't upload thcs. This is useful if the files need
+  # to be manually split before uploading.  Does not remove streams in CloudWatch.
+  #{File.basename($0)} -s 1537574400 -e 1539214898 --dry-run --skip-delete prod_/srv/idp/shared/log/events.log login-gov-prod-logs
+
+  # Download logs from prod events.log between 2018-09-21 and 2018-10-10, and
+  # upload them to s3://login-gov-prod-logs/ then re-import streams to CloudWatch
+  #{File.basename($0)} -s 1537574400 -e 1539214898 prod_/srv/idp/shared/log/events.log login-gov-prod-logs
+
+Options:
+    EOM
+
+    opts.on('-h', '--help', 'Display this message') do
+      STDERR.puts opts
+      exit
+    end
+
+    opts.on('--permission-help', 'Extended help on required IAM permissions') do
+      STDERR.puts <<EOM
+This program requires significant permissions to complete its work.  If run
+on an EC2 instance these permissions should only be attached temporarily and
+be removed once the program is done running.
+
+# Role creation
+
+# Attaching to an instance
+
+# Removing from and instance
+
+# Role deletion
+
+TBD
+
+EOM
+      exit
+    end
+
+    opts.on('-s', '--start-time STAMP',
+            'Start time in seconds since the epoch or ISO8601 time') do |timestring|
+      options[:start_timestring] = timestring
+    end
+
+    opts.on('-e', '--end-time STAMP',
+            'End time as in seconds since the epoch or ISO8601 time') do |timestring|
+      options[:end_timestring] = timestring
+    end
+
+    opts.on('-l', '--list-only', 'Write list of streams to STDOUT or stream file and exit') do
+      options[:list_only] = true
+    end
+
+    opts.on('-d', '--local-dir DIRECTORY', 'Local directory to save logs under') do |local_dir|
+      options[:local_dir] = local_dir
+    end
+
+    opts.on('-f', '--stream-file FILE',
+            'Stream list file to write to (-l) or read from') do |stream_file|
+      options[:stream_file] = stream_file
+    end
+
+    opts.on('-c', '--checkpoint-file FILE',
+            'File to track list of completed streams') do |checkpoint_file|
+      options[:checkpoint_file] = checkpoint_file
+    end
+
+    opts.on('-S', '--skip STREAM',
+            'List of log streams (space separated) to ignore') do |streams|
+      options[:skip_streams] ||= Set.new
+      options[:skip_streams] += streams.split(' ')
+    end
+
+    opts.on('-Z', '--split-bytes SIZE',
+            'Split output files into chunks <= SIZE bytes.') do |val|
+      options[:split_bytes] = Integer(val)
+    end
+
+    opts.on('-j', '--scrub-jsonpath JSONPATH',
+            'One or more JSON Paths (space separated) to redact from logs') do |jsonpaths|
+      options[:scrub_jsonpaths] = jsonpaths.split(' ')
+    end
+
+    opts.on('-g', '--scrub-gsub PATTERN', 'Ruby gsub (plain or regex) to redact from logs') do |pattern|
+      if pattern.start_with?('/') && pattern.end_with?('/')
+        options[:scrub_gsub] = pattern.to_regexp
+      else
+        options[:scrub_gsub] = pattern
+      end
+    end
+
+    opts.on('-b', '--s3-url URL',
+            'S3 URL to store copies of scrubbed logs in') do |s3_url|
+      options[:s3_url] = s3_url
+    end
+
+    opts.on('--reload', 'Load scrubbed events into CloudWatch without destroying existing streams - DANGER: POSSIBLY MESSY') do
+      options[:reload] = true
+    end
+
+    opts.on('--replace', 'Replace streams in CloudWatch - DANGER: DESTRUCTIVE') do
+      options[:replace] = true
+    end
+
+    opts.on('-k', '--keep', 'Keep local copies of logs') do
+      options[:keep] = true
+    end
+
+    opts.on('-n', '--dry-run', "Download and filter but DO NOT upload logs or replace streams") do
+      options[:dry_run] = true
+    end
+
+    opts.on('--debug', "Enable debug logging") do
+      options[:log_level] = Logger::DEBUG
+    end
+
+    opts.on('--aws-log FILE', 'Write AWS logs to a file - Useful for measuring AWS API calls') do |aws_log_file|
+      options[:aws_log_file] = aws_log_file
+    end
+  end
+
+  args = optparse.parse(ARGV)
+
+  if args.length != 1
+    STDERR.puts(optparse)
+    STDERR.puts("\nMust pass a CloudWatch log group name")
+    exit 1
+  end
+
+  if options[:reload] && options[:replace]
+    STDERR.puts(optparse)
+    STDERR.puts("\n--reload and --replace are mutually exclusive!  Pick one")
+    exit 1
+  end
+
+  group_name = args[0]
+
+  cs = CloudScrub.new(
+              cli_mode: true,
+              log_level: options[:log_level],
+              aws_log_file: options[:aws_log_file],
+              dry_run: options[:dry_run])
+
+  # Coerce time string into milliseconds
+  if options[:start_timestring]
+    options[:start_time] = cs.timestring_to_stamp_ms(options[:start_timestring])
+    cs.log.info("Start time: #{cs.parse_timestamp_ms(options[:start_time])} #{options[:start_time]}ms")
+  end
+
+  if options[:end_timestring]
+    options[:end_time] = cs.timestring_to_stamp_ms(options[:end_timestring])
+    cs.log.info("End time: #{cs.parse_timestamp_ms(options[:end_time])} #{options[:end_time]}ms")
+  end
+
+  # Get list of streams
+  stream_names = []
+  if options[:list_only].nil? && options[:stream_file]
+    File.open(options[:stream_file], 'r').each do |l|
+      stream_names << l.chomp
+    end
+    cs.log.info("Loaded #{stream_names.length} streams from #{options[:stream_file]}")
+  else
+    raw_streams = cs.list_streams(group_name, start_time: options[:start_time], end_time: options[:end_time])
+
+    # We only care about the stream name
+    raw_streams.each do |stream|
+      stream_names << stream[:log_stream_name]
+    end
+    cs.log.info("Found #{stream_names.length} streams in group #{group_name.inspect}")
+  end
+
+  if !options[:checkpoint_file].nil?
+    if File.exist?(options[:checkpoint_file])
+      completed = File.read(options[:checkpoint_file]).split.to_set
+      if completed.length
+        cs.log.info("Adding #{completed.length} streams from #{options[:checkpoint_file].inspect} to skip list")
+        options[:skip_streams] ||= Set.new
+        options[:skip_streams] += completed
+      end
+    else
+      # Ensure checkpoint file exists without truncating
+      File.open(options[:checkpoint_file], 'a') {}
+      cs.log.info("Creating checkpoint file #{options[:checkpoint_file].inspect}")
+    end
+  end
+
+  # Filter streams by name
+  if !options[:skip_streams].nil? && options[:skip_streams].length
+    slen = stream_names.length
+    # Drop streams included in our skip_streams set
+    stream_names = stream_names.reject { |s| options[:skip_streams].include?(s) }
+    cs.log.info("Will process #{stream_names.length} out of #{slen} detected streams")
+  end
+
+  # Dump out stream names
+  if options[:list_only]
+    if options[:stream_file]
+      sfile = File.open(options[:stream_file], 'w')
+    else
+      sfile = $stdout.dup
+    end
+
+    stream_names.each do |stream_name|
+      sfile.puts stream_name
+    end
+
+    sfile.close
+
+    options[:stream_file].nil? || cs.log.info("Wrote stream list to #{options[:stream_file].inspect}")
+    exit 0
+  end
+
+  # Directory structure: <local_dir>/<log_group_name>
+  if !Dir.exist?(options[:local_dir])
+    cs.log.info("Creating local log directory #{options[:local_dir].inspect}")
+    Dir.mkdir(options[:local_dir])
+  end
+
+  # Process streams
+  results = {}
+
+  stream_names.each do |stream_name|
+    begin
+      # Process stream to filtered file(s) and retain stream to file mapping
+      results[stream_name] = cs.download_and_filter_stream(group_name,
+                                                           stream_name,
+                                                           local_dir: options[:local_dir],
+                                                           split_bytes: options[:split_bytes],
+                                                           scrub_jsonpaths: options[:scrub_jsonpaths],
+                                                           scrub_gsub: options[:scrub_gsub])
+
+      # Stash clean logs in S3
+      unless options[:s3_url].nil?
+        results[stream_name][:filenames].each do |filename|
+          cs.upload_file_to_s3(filename, options[:s3_url])
+        end
+      end
+
+      # Reload or replace original CloudWatch stream
+      if options[:reload] || options[:replace]
+        cs.upload_eventfiles_to_cloudwatch_stream(group_name: group_name,
+                                                  stream_name: stream_name,
+                                                  filenames: results[stream_name][:filenames],
+                                                  replace: options[:replace])
+      end
+
+      # Delete after processing
+      if options[:keep].nil?
+        results[stream_name][:filenames].each do |filename|
+          File.exist?(filename) && cs.delete_local_file(filename)
+        end
+      end
+
+      # Mark processed
+      if options[:checkpoint_file]
+        File.open(options[:checkpoint_file], 'a').write("#{stream_name}\n")
+      end
+    rescue => err
+      cs.log.warn("Unable to process #{stream_name.inspect}: #{err.inspect}")
+
+      if results.key?(stream_name)
+        # Delete local copy UNLESS we are set to keep or replace streams
+        if !options[:keep].nil? || options[:replace]
+          cs.log.warn("Keeping local files for #{stream_name.inspect}")
+        elsif results[stream_name].key?(:filenames)
+          cs.log.warn("Removing local files for #{stream_name.inspect}")
+          results[stream_name][:filenames].each do |filename|
+            File.exist?(filename) && cs.delete_local_file(filename)
+          end
+        end
+        results.delete(stream_name)
+      end
+    end
+  end
+
+  # Stats stats stats...
+  file_count = results.map { |_, s| s[:filenames].length }.sum
+  event_count = results.map { |_, s| s[:event_count] }.sum
+  scrubbed_count = results.map { |_, s| s[:scrubbed_count] }.sum
+  in_bytes = cs.humansize(results.map { |_, s| s[:in_bytes] }.sum)
+  out_bytes = cs.humansize(results.map { |_, s| s[:out_bytes] }.sum)
+
+  cs.log.info("#{stream_names.length} streams processed into #{file_count} files with #{event_count} events " +
+              "(#{scrubbed_count} scrubbed) - #{in_bytes} read, #{out_bytes} written")
+end
+
+if $0 == __FILE__
+  main
+end
