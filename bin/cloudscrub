@@ -280,9 +280,9 @@ EOM
 
       # Reload or replace original CloudWatch stream
       if options[:reload] || options[:replace]
-        cs.upload_eventfiles_to_cloudwatch_stream(group_name: group_name,
-                                                  stream_name: stream_name,
-                                                  filenames: results[stream_name][:filenames],
+        cs.upload_eventfiles_to_cloudwatch_stream(group_name,
+                                                  stream_name,
+                                                  results[stream_name][:filenames],
                                                   replace: options[:replace])
       end
 

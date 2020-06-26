@@ -110,28 +110,6 @@ class CloudScrub
     streams
   end
 
-  # @param [String] group_name Log group to work in
-  # @param [String] stream_name Complete stream to pull from
-  #
-  # @return [Hash] Next event in stream
-  def each_event_in_stream(group_name, stream_name)
-    unless block_given?
-      return to_enum(:each_log_event_in_stream, stream_name, start_time:
-                     start_time, end_time: end_time)
-    end
-    cloudwatch_client_ro.get_log_events(
-      log_group_name: group_name,
-      log_stream_name: stream_name,
-      start_from_head: true,
-      start_time: nil,
-      end_time: nil
-    ).each do |resp|
-      resp.events.each do |event|
-        yield event
-      end
-    end
-  end
-
   # @param [String] message Log line to filter
   # @param [String or Regex] scrub_gsub String (for plain match) or regex to filter
   #
@@ -233,6 +211,28 @@ class CloudScrub
     (t.to_f * 1000).round
   end
 
+  # @param [String] group_name Log group to work in
+  # @param [String] stream_name Complete stream to pull from
+  #
+  # @return [Hash] Next event in stream
+  def each_event_in_stream(group_name, stream_name)
+    unless block_given?
+      return to_enum(:each_log_event_in_stream, stream_name, start_time:
+                     start_time, end_time: end_time)
+    end
+    cloudwatch_client_ro.get_log_events(
+      log_group_name: group_name,
+      log_stream_name: stream_name,
+      start_from_head: true,
+      start_time: nil,
+      end_time: nil
+    ).each do |resp|
+      resp.events.each do |event|
+        yield event
+      end
+    end
+  end
+
   # @param [String] group_name Name of log group to work in
   # @param [String] stream_name Name of stream to process
   # @param [String] local_dir Local directory to save stream files under
@@ -274,7 +274,7 @@ class CloudScrub
       jsonpaths = scrub_jsonpaths.map { |p| [p, JsonPath.new(p)] }.to_h
     end
 
-    log.info("Downloading log stream #{stream_name.inspect} to #{local_dir.inspect}")
+    log.info("Downloading log stream \"#{group_name}/#{stream_name}\" to #{local_dir.inspect}")
 
     each_event_in_stream(group_name, stream_name) do |event|
       message = event.message
@@ -386,9 +386,9 @@ class CloudScrub
   def delete_cloudwatch_stream(group_name, stream_name)
     log.info("Deleting stream \"#{group_name}/#{stream_name}\"#{dry_tag}")
     
-    cloudwatch_client_rw.delete_stream(
-      group_name: group_name,
-      stream_name: stream_name
+    cloudwatch_client_rw.delete_log_stream(
+      log_group_name: group_name,
+      log_stream_name: stream_name
     )
   end
 
@@ -397,9 +397,9 @@ class CloudScrub
   def create_new_cloudwatch_stream(group_name, stream_name)
     log.info("Creating stream \"#{group_name}/#{stream_name}\"#{dry_tag}")
 
-    cloudwatch_client_rw.create_stream(
-      group_name: group_name,
-      stream_name: stream_name
+    cloudwatch_client_rw.create_log_stream(
+      log_group_name: group_name,
+      log_stream_name: stream_name
     )
   end
 
@@ -411,11 +411,9 @@ class CloudScrub
     log.info("Adding log events for  \"#{group_name}/#{stream_name}\"#{dry_tag}")
 
     cloudwatch_client_rw.put_log_events(
-      {
-        group_name: group_name,
-        stream_name: stream_name,
+        log_group_name: group_name,
+        log_stream_name: stream_name,
         log_events: events
-      }
     )
   end
 
