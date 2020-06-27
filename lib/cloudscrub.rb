@@ -51,8 +51,14 @@ class CloudScrub
 
   # @param [String] aws_log_file File to capture AWS call logs in
   def enable_aws_logging(aws_log_file)
+    # Create a modified short logger that does not add an extra \n
+    aws_log_formatter = Aws::Log::Formatter.new(
+      "[:client_class :http_response_status_code :time] :operation :error_class",
+      max_string_size: 1000
+    )
     # Setup default AWS logger - Defaults to INFO and seems to ignore other levels :(
-    Aws.config.update({:logger => Logger.new(aws_log_file)})
+    Aws.config.update({:logger => Logger.new(aws_log_file),
+                       :log_formatter => aws_log_formatter})
   end
 
   # @return [Aws::CloudWatchLogs::Client] On-demand initialized CloudWatch
@@ -85,11 +91,16 @@ class CloudScrub
       streams.concat(resp.log_streams)
     end
 
+    if streams.length == 0
+      log.warn("No streams found in #{group_name.inspect} for time range")
+      return streams
+    end
+
     # if start time is provided, find all streams that have at least one event
     # after start_time
     if start_time
       streams.select! { |s|
-        s.last_event_timestamp >= start_time
+        !s.last_event_timestamp.nil? && s.last_event_timestamp >= start_time
       }
     end
 
@@ -97,7 +108,7 @@ class CloudScrub
     # before end_time
     if end_time
       streams.select! { |s|
-        s.first_event_timestamp <= end_time
+        !s.first_event_timestamp.nil? && s.first_event_timestamp <= end_time
       }
     end
 
