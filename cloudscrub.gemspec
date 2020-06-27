@@ -5,7 +5,7 @@ require 'cloudscrub/version'
 
 Gem::Specification.new do |spec|
   spec.name          = "cloudscrub"
-  spec.version       = Cloudscrub::VERSION
+  spec.version       = CloudScrub::VERSION
   spec.authors       = ["Login.gov"]
   spec.email         = ["hello@login.gov"]
 

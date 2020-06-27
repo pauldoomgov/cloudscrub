@@ -1,9 +1,9 @@
-RSpec.describe Cloudscrub do
+RSpec.describe CloudScrub do
   it "has a version number" do
-    expect(Cloudscrub::VERSION).not_to be nil
+    expect(CloudScrub::VERSION).not_to be nil
   end
 
-  it "does something useful" do
-    expect(false).to eq(true)
+  it "initializes" do
+    expect(CloudScrub.new).not_to be nil
   end
 end

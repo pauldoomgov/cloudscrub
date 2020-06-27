@@ -1,3 +1,3 @@
-module Cloudscrub
+class CloudScrub
   VERSION = "0.1.0"
 end

@@ -7,14 +7,15 @@ require 'jsonpath'
 require 'aws-sdk-cloudwatchlogs'
 require 'aws-sdk-s3'
 
+require 'cloudscrub/version'
 
 # Set of utilities for download, scrub, S3 stashing, and replacement of
-# CloudWatch log streams
+# CloudWatch log streams.
 class CloudScrub
   
   # @param [Bool] cli_mode Set true for cli style logging
   # @param [Filehandle] log_to Filehandle to write to
-  # @param [Logger:: LEVEL] log_level Logger log level to log at
+  # @param [Integer] log_level Logger log level
   # @param [String] aws_log_file Debug log file for AWS calls
   # @param [Bool] dry_run Read but don't write to any AWS resource
   def initialize(cli_mode: false, log_to: STDERR, log_level: Logger::INFO, aws_log_file: nil, dry_run: false)
@@ -23,8 +24,9 @@ class CloudScrub
     @log_level = log_level
     @dry_run = dry_run
 
+    # AWS logging is uncontrollably verbose so it goes to a file
     if aws_log_file
-      enable_aws_logging(aws_log_file)
+      enable_aws_logging(aws_log_file, log_level: log_level)
     end
   end
 
@@ -50,12 +52,19 @@ class CloudScrub
   end
 
   # @param [String] aws_log_file File to capture AWS call logs in
-  def enable_aws_logging(aws_log_file)
-    # Create a modified short logger that does not add an extra \n
-    aws_log_formatter = Aws::Log::Formatter.new(
-      "[:client_class :http_response_status_code :time] :operation :error_class",
-      max_string_size: 1000
-    )
+  # @param [Integer] log_level Logger level - Only DEBUG (0) changes behavior
+  def enable_aws_logging(aws_log_file, log_level: Logger::INFO)
+    if log_level != Logger::DEBUG
+      # For non-debug, create a modified short logger that does not add an extra \n
+      aws_log_formatter = Aws::Log::Formatter.new(
+        "[:client_class :http_response_status_code :time] :operation :error_class",
+        max_string_size: 1000
+      )
+    else
+      # The default format is VERY verbose which is OK for debugging
+      aws_log_formatter = Aws::Log::Formatter.default
+    end
+
     # Setup default AWS logger - Defaults to INFO and seems to ignore other levels :(
     Aws.config.update({:logger => Logger.new(aws_log_file),
                        :log_formatter => aws_log_formatter})
@@ -421,11 +430,11 @@ class CloudScrub
     # to a given log stream.
     log.info("Adding log events for  \"#{group_name}/#{stream_name}\"#{dry_tag}")
 
-    cloudwatch_client_rw.put_log_events(
+    cloudwatch_client_rw.put_log_events({
         log_group_name: group_name,
         log_stream_name: stream_name,
         log_events: events
-    )
+    })
   end
 
   # @param [String] group_name Name of log group to replace the stream in
