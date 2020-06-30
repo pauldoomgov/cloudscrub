@@ -173,29 +173,11 @@ class CloudScrub
     message
   end
 
-  # @param [Integer] timestamp ms since epoch
-  # @param [String] stream_name Original stream name
-  # @param [String] message Event message
-  #
-  # @return [String] LF terminated string ready to write to file
-  #
-  # Adds logstash-like timestamp and hostname to the input log event.
-  def serialize_event(timestamp, stream_name, message)
-    [timestamp, stream_name, message].join(' ') + "\n"
-  end
-
-  # @param [String] Line from saved log file
-  #
-  # @return [Array[Integer, String, String]] timestamp, stream_name, and raw log line
-  def deserialize_event(logline)
-    timestamp, stream_name, message = logline.chomp.split(' ', 3)
-  end
-
   # @param [Integer] ms_timestamp Milliseconds since epoch
   #
   # @return [Time] Time object
   def parse_timestamp_ms(ms_timestamp)
-    Time.at(ms_timestamp / 1000.0).utc
+    Time.at(ms_timestamp * 0.001).utc
   end
 
   # @param [Time] time Time object
@@ -229,6 +211,33 @@ class CloudScrub
     end
 
     (t.to_f * 1000).round
+  end
+
+  # @param [Integer] timestamp ms since epoch
+  # @param [String] stream_name Original stream name
+  # @param [String] message Event message
+  #
+  # @return [String] LF terminated string ready to write to file
+  #
+  # Adds logstash-like timestamp and hostname to the input log event.
+  def serialize_event(timestamp, stream_name, message)
+    [timestamp.to_s, stream_name, message].join(' ') + "\n"
+  end
+
+  # @param [String] Line from saved log file
+  #
+  # @return [Array[Integer, String, String]] timestamp, stream_name, and raw log line
+  def deserialize_event(logline)
+    match = logline.chomp.match(/^(\d+) ([^ ]+) (.+)$/)
+    unless match
+      raise StandardError.new("Unable to parse line: #{logline.inspect}")
+    end
+  
+    timestamp = match[1].to_i
+    stream_name = match[2]
+    message = match[3]
+
+    [timestamp, stream_name, message]
   end
 
   # @param [String] group_name Log group to work in
