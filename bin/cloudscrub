@@ -18,8 +18,7 @@ def main
 usage: #{File.basename($0)} [OPTIONS] LOG_GROUP_NAME
 
 Download all CloudWatch Logs for the specified time window from the specified log group,
-and upload them to LOG_BUCKET_NAME, delete the original log stream, then re-upload
-to CloudWatch.
+and upload them to LOG_BUCKET_NAME, then delete the original log stream,
 
 The current working directory will be used for temporary storage of the log
 files, which may be very large!
@@ -30,52 +29,11 @@ scrubbing scenarios.  Multiple JSON Path filters may be specified.  If a JSON Pa
 is set the log line will be parsed as JSON and all elements mathing a JSON Path filter
 will be removed from the output.
 
-For example:
-  # Download logs from prod events.log between 2018-09-21 and 2018-10-10,
-  # split them into 5 MiB chunks, and then upload them to S3 under
-  # s3://login-gov-prod-logs/imported_from_cloudwatch_logs/events.log/.
-  # Don't delete them afterwards in case it's useful to go through thcs.
-  #{File.basename($0)} -s 1537574400 -e 1539214898 --split-bytes 5242880 --skip-delete -g prod_/srv/idp/shared/log/events.log -a login-gov-prod-logs
-
-  # Download logs from prod events.log between 2018-09-21 and 2018-10-10, but
-  # keep them locally and don't upload them to S3 or reimport streams.
-  # This is useful if the files need to be manually split before uploading.
-  #{File.basename($0)} -s 1537574400 -e 1539214898 --dry-run --skip-delete prod_/srv/idp/shared/log/events.log login-gov-prod-logs
-
-  # Download logs from prod events.log between 2018-09-21 and 2018-10-10, but
-  # keep them locally and don't upload thcs. This is useful if the files need
-  # to be manually split before uploading.  Does not remove streams in CloudWatch.
-  #{File.basename($0)} -s 1537574400 -e 1539214898 --dry-run --skip-delete prod_/srv/idp/shared/log/events.log login-gov-prod-logs
-
-  # Download logs from prod events.log between 2018-09-21 and 2018-10-10, and
-  # upload them to s3://login-gov-prod-logs/ then re-import streams to CloudWatch
-  #{File.basename($0)} -s 1537574400 -e 1539214898 prod_/srv/idp/shared/log/events.log login-gov-prod-logs
-
 Options:
     EOM
 
     opts.on('-h', '--help', 'Display this message') do
       STDERR.puts opts
-      exit
-    end
-
-    opts.on('--permission-help', 'Extended help on required IAM permissions') do
-      STDERR.puts <<EOM
-This program requires significant permissions to complete its work.  If run
-on an EC2 instance these permissions should only be attached temporarily and
-be removed once the program is done running.
-
-# Role creation
-
-# Attaching to an instance
-
-# Removing from and instance
-
-# Role deletion
-
-TBD
-
-EOM
       exit
     end
 
@@ -136,15 +94,21 @@ EOM
       options[:s3_url] = s3_url
     end
 
-    opts.on('--reload', 'Load scrubbed events into CloudWatch without destroying existing streams - DANGER: POSSIBLY MESSY') do
-      options[:reload] = true
+    opts.on('-D', '--date-subfolders',
+            'Place downloaded and S3 streams under YYYY-MM-DD subfolders') do
+      options[:date_subfolders] = true
     end
 
-    opts.on('--replace', 'Replace streams in CloudWatch - DANGER: DESTRUCTIVE') do
-      options[:replace] = true
+    opts.on('--delete', 'Delete stream from CloudWatch once scrubbed version is uploaded to S3') do
+      options[:delete] = true
     end
 
-    opts.on('-k', '--keep', 'Keep local copies of logs') do
+    opts.on('--delete-matching',
+            'Delete stream from CW once scrubbed is uploaded to S3 IF the stream matched any patterns') do
+      options[:delete_matching] = true
+    end
+
+    opts.on('-k', '--keep-local', 'Keep local copies of logs') do
       options[:keep] = true
     end
 
@@ -169,12 +133,6 @@ EOM
     exit 1
   end
 
-  if options[:reload] && options[:replace]
-    STDERR.puts(optparse)
-    STDERR.puts("\n--reload and --replace are mutually exclusive!  Pick one")
-    exit 1
-  end
-
   group_name = args[0]
 
   cs = CloudScrub.new(
@@ -186,12 +144,12 @@ EOM
   # Coerce time string into milliseconds
   if options[:start_timestring]
     options[:start_time] = cs.timestring_to_stamp_ms(options[:start_timestring])
-    cs.log.info("Start time: #{cs.parse_timestamp_ms(options[:start_time])} #{options[:start_time]}ms")
+    cs.log.info("Start time: #{cs.stamp_ms_to_iso8601(options[:start_time])} #{options[:start_time]}ms")
   end
 
   if options[:end_timestring]
     options[:end_time] = cs.timestring_to_stamp_ms(options[:end_timestring])
-    cs.log.info("End time: #{cs.parse_timestamp_ms(options[:end_time])} #{options[:end_time]}ms")
+    cs.log.info("End time: #{cs.stamp_ms_to_iso8601(options[:end_time])} #{options[:end_time]}ms")
   end
 
   # Get list of streams
@@ -268,25 +226,27 @@ EOM
                                                            stream_name,
                                                            local_dir: options[:local_dir],
                                                            split_bytes: options[:split_bytes],
+                                                           date_subfolders: options[:date_subfolders],
                                                            scrub_jsonpaths: options[:scrub_jsonpaths],
                                                            scrub_gsub: options[:scrub_gsub])
 
       # Stash clean logs in S3
       unless options[:s3_url].nil?
         results[stream_name][:filenames].each do |filename|
-          cs.upload_file_to_s3(filename, options[:s3_url])
+          cs.upload_file_to_s3(filename, options[:s3_url], keep_subfolder: options[:date_subfolders])
         end
       end
 
-      # Reload or replace original CloudWatch stream
-      if options[:reload] || options[:replace]
-        cs.upload_eventfiles_to_cloudwatch_stream(group_name,
-                                                  stream_name,
-                                                  results[stream_name][:filenames],
-                                                  replace: options[:replace])
+      # Delete source if asked to, or of any events were scrubbed and asked to delete matchin
+      if options[:delete] || (options[:delete_matching] && results[stream_name][:scrubbed_count] > 0)
+        cs.delete_cloudwatch_stream(group_name, stream_name)
+      elsif options[:delete_matching] && results[stream_name][:scrubbed_count] == 0
+        cs.log.info("No matching events in \"#{group_name}/#{stream_name}\"")
+      else
+        
       end
 
-      # Delete after processing
+      # Delete local after processing
       if options[:keep].nil?
         results[stream_name][:filenames].each do |filename|
           File.exist?(filename) && cs.delete_local_file(filename)
@@ -301,9 +261,10 @@ EOM
       cs.log.warn("Unable to process #{stream_name.inspect}: #{err.inspect}")
 
       if results.key?(stream_name)
-        # Delete local copy UNLESS we are set to keep or replace streams
-        if !options[:keep].nil? || options[:replace]
-          cs.log.warn("Keeping local files for #{stream_name.inspect}")
+        # Delete local copy UNLESS we are set to keep local OR or delete
+        # streams.  Better safe than without data.
+        if !options[:keep].nil? || options[:delete] || options[:delete_matching]
+          cs.log.warn("Keeping local files for failed stream #{stream_name.inspect}")
         elsif results[stream_name].key?(:filenames)
           cs.log.warn("Removing local files for #{stream_name.inspect}")
           results[stream_name][:filenames].each do |filename|

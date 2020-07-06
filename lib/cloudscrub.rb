@@ -45,7 +45,7 @@ class CloudScrub
     if @cli_mode
       @log.progname = File.basename($0)
     else
-      @log.progname = self.name
+      @log.progname = (defined? self.name) ? self.name : self.class.inspect
     end
 
     @log
@@ -174,21 +174,19 @@ class CloudScrub
   end
 
   # @param [Integer] ms_timestamp Milliseconds since epoch
+  # @param [Bool] date_only Set to true to return YYYY-MM-DD only
   #
-  # @return [Time] Time object
-  def parse_timestamp_ms(ms_timestamp)
-    Time.at(ms_timestamp * 0.001).utc
+  # @return [String] ISO8601 timestamp with milliseconds OR just date
+  def stamp_ms_to_iso8601(ms_timestamp, date_only: false)
+    t = Time.at(ms_timestamp * 0.001).utc
+    date_only ? t.strftime('%F') : t.strftime('%FT%T.%LZ')
   end
 
-  # @param [Time] time Time object
+  # @param [String] isotime ISO8601 string in the form YYYY-MM-DDTHH:MM:SS.mmZ
   #
   # @return [Integer] Milliseconds since epoch
-  def time_to_stamp_ms(time)
-    unless time.is_a?(Time)
-      raise ArgumentError.new("Unexpected Time object: #{time.inspect}")
-    end
-
-    (time.to_f * 1000).round
+  def iso8601_to_stamp_ms(isotime)
+    (Time.parse(isotime).to_f * 1000).round
   end
 
   # @param [String] timestring Time represented as seconds since epoch OR
@@ -214,30 +212,32 @@ class CloudScrub
   end
 
   # @param [Integer] timestamp ms since epoch
+  # @param [String] group_name Log group name
   # @param [String] stream_name Original stream name
   # @param [String] message Event message
   #
-  # @return [String] LF terminated string ready to write to file
-  #
-  # Adds logstash-like timestamp and hostname to the input log event.
-  def serialize_event(timestamp, stream_name, message)
-    [timestamp.to_s, stream_name, message].join(' ') + "\n"
+  # @return [String] LF terminated JSON line ready to write to file
+  def serialize_event(timestamp, group_name, stream_name, message)
+    JSON.dump({
+      '@timestamp' => stamp_ms_to_iso8601(timestamp),
+      'type' => "cw_#{group_name}",
+      'host' => { 'name' => stream_name},
+      'events' => message
+     }) + "\n"
   end
 
   # @param [String] Line from saved log file
   #
-  # @return [Array[Integer, String, String]] timestamp, stream_name, and raw log line
+  # @return [Array[timestamp, group_name, stream_name, message]]
   def deserialize_event(logline)
-    match = logline.chomp.match(/^(\d+) ([^ ]+) (.+)$/)
-    unless match
-      raise StandardError.new("Unable to parse line: #{logline.inspect}")
-    end
+    jdata = JSON.parse(logline.chomp)
   
-    timestamp = match[1].to_i
-    stream_name = match[2]
-    message = match[3]
+    timestamp = jdata['@timestamp']
+    group_name = jdata['type'].gsub(/^cw_/, '')
+    stream_name = jdata['host']['name']
+    message = jdata['events']
 
-    [timestamp, stream_name, message]
+    [timestamp, group_name, stream_name, message]
   end
 
   # @param [String] group_name Log group to work in
@@ -267,6 +267,8 @@ class CloudScrub
   # @param [String] local_dir Local directory to save stream files under
   # @param [Integer] split_bytes Maximum size of output text files that are saved
   #                              locally and saved in S3
+  # @param [Bool] date_subfolders Set to true to place each stream directly under a datestamped
+  #                               subfolder based on first log line
   # @param [String or Regex] scrub_gsub gsub expression to filter from logs
   # @param [Array] scrub_jsonpaths List of JSONPath expressions to delete from logs
   # @return [Hash] A hash with the following items:
@@ -281,6 +283,7 @@ class CloudScrub
     stream_name,
     local_dir: '.',
     split_bytes: nil,
+    date_subfolders: true,
     scrub_jsonpaths: nil,
     scrub_gsub: nil
   )
@@ -303,7 +306,7 @@ class CloudScrub
       jsonpaths = scrub_jsonpaths.map { |p| [p, JsonPath.new(p)] }.to_h
     end
 
-    log.info("Downloading log stream \"#{group_name}/#{stream_name}\" to #{local_dir.inspect}")
+    log.info("Downloading log stream \"#{group_name}/#{stream_name}\"")
 
     each_event_in_stream(group_name, stream_name) do |event|
       message = event.message
@@ -323,7 +326,7 @@ class CloudScrub
       out_bytes += message.bytesize
 
       # Transform the event into a logstash/syslog like format
-      output_data = serialize_event(event.timestamp, stream_name, message)
+      output_data = serialize_event(event.timestamp, group_name, stream_name, message)
 
       # TODO - File writer should be its own generator
       # Open a new file if no file yet or if we would exceed the split size
@@ -336,7 +339,17 @@ class CloudScrub
           f_base = stream_name + '.log'
         end
 
-        filename = File.join(local_dir, f_base)
+        if date_subfolders
+          cur_local_dir = File.join(local_dir, stamp_ms_to_iso8601(event.timestamp, date_only: true))
+          if !Dir.exist?(cur_local_dir)
+            log.debug("Creating local log directory #{cur_local_dir}.inspect")
+            Dir.mkdir(cur_local_dir)
+          end
+        else
+          cur_local_dir = local_dir
+        end
+
+        filename = File.join(cur_local_dir, f_base)
 
         log.info("Creating new output file #{filename.inspect}")
         cur_file = File.open(filename, File::WRONLY | File::CREAT | File::EXCL)
@@ -394,10 +407,22 @@ class CloudScrub
 
   # @param [String] filename File to upload
   # @param [String] s3_url Full S3 URL to upload to
-  def upload_file_to_s3(filename, s3_url)
+  # @param [Bool] keep_subfolder Retain the parent folder for each filename
+  #                            
+  # @return [Response] AWS client response
+  def upload_file_to_s3(filename, s3_url, keep_subfolder: false)
     (s3_bucket, s3_directory) = parse_s3_url(s3_url)
 
-    s3_path = [s3_directory, File.basename(filename)].join('/')
+    basepath, basename = File.split(filename)
+    pathset = [basename]
+
+    if keep_subfolder
+      pathset.unshift(File.basename(basepath))
+    end
+
+    pathset.unshift(s3_directory)
+
+    s3_path = pathset.join('/')
 
     log.info("Uploading #{filename.inspect} to \"s3://#{s3_bucket}/#{s3_path}\"#{dry_tag}")
 
@@ -412,6 +437,7 @@ class CloudScrub
 
   # @param [String] group_name Name of log group to delete stream from
   # @param [String] stream_name Name of stream to delete
+  # @return [Response] AWS client response
   def delete_cloudwatch_stream(group_name, stream_name)
     log.info("Deleting stream \"#{group_name}/#{stream_name}\"#{dry_tag}")
     
@@ -421,57 +447,69 @@ class CloudScrub
     )
   end
 
-  # @param [String] group_name Name of log group to create stream in
-  # @param [String] stream_name Name of stream to create
-  def create_new_cloudwatch_stream(group_name, stream_name)
-    log.info("Creating stream \"#{group_name}/#{stream_name}\"#{dry_tag}")
-
-    cloudwatch_client_rw.create_log_stream(
-      log_group_name: group_name,
-      log_stream_name: stream_name
-    )
-  end
-
-  # @param [String] group_name Name of log group to create stream in
-  # @param [String] stream_name Name of stream to create
-  def upload_events_to_cloudwatch_stream(group_name, stream_name, events)
-    # Upload a set of stream events with timestamp and message keys
-    # to a given log stream.
-    log.info("Adding log events for  \"#{group_name}/#{stream_name}\"#{dry_tag}")
-
-    cloudwatch_client_rw.put_log_events({
-        log_group_name: group_name,
-        log_stream_name: stream_name,
-        log_events: events
-    })
-  end
-
-  # @param [String] group_name Name of log group to replace the stream in
-  # @param [String] stream_name Name of stream to replace or create
-  # @param [Array] filenames List of paths to saved log files to load into stream
-  # @param [Bool] replace Set to true to recreate stream instead of just appending events
+  # TODO - Stream replacement is limited to the point of being nearly pointless.
+  # Limitations here: https://docs.aws.amazon.com/AmazonCloudWatchLogs/latest/APIReference/API_PutLogEvents.html
+  # - Maximum events/PUT - 10000
+  # - Maximum payload size - 1,048,576 bytes (1MB) - Calculated as sum(UTF-8 encoded event sizes) + n * 26 
+  # - All events must be in order (sort on timestamp key)
+  # - All events must be within a 24 hour window
+  # - Events can be backdated up to 14 days OR the retention period, whichever is shorter
+  # - Events are rate limited to 5/sec (~5MB of logs/sec - About 17GB/hour)
   #
-  # @return [Array] List of files that were successfully processed
-  def upload_eventfiles_to_cloudwatch_stream(group_name, stream_name, filenames, replace: false)
-    processed = []
-
-    filenames.each do |filename|
-      events = load_events_from_file(filename)
-      events.length || next
-
-      if replace
-        delete_cloudwatch_stream(group_name, stream_name)
-      end
-
-      create_new_cloudwatch_stream(group_name, stream_name)
-
-      upload_events_to_cloudwatch_stream(group_name, stream_name, events)
- 
-      processed << filename
-    end
-
-    processed
-  end
+  # Leaving vestigial code in case someone wants to address these items.
+  #
+  # @param [String] group_name Name of log group to create stream in
+  # @param [String] stream_name Name of stream to create
+  # @return [Response] AWS client response
+  # def create_new_cloudwatch_stream(group_name, stream_name)
+  #   log.info("Creating stream \"#{group_name}/#{stream_name}\"#{dry_tag}")
+  #   cloudwatch_client_rw.create_log_stream(
+  #     log_group_name: group_name,
+  #     log_stream_name: stream_name
+  #   )
+  # end
+  #
+  # # @param [String] group_name Name of log group to create stream in
+  # # @param [String] stream_name Name of stream to create
+  # # @return [Response] AWS client response
+  # def upload_events_to_cloudwatch_stream(group_name, stream_name, events)
+  #   # Upload a set of stream events with timestamp and message keys
+  #   # to a given log stream.
+  #   log.info("Adding log events for  \"#{group_name}/#{stream_name}\"#{dry_tag}")
+  #
+  #   cloudwatch_client_rw.put_log_events({
+  #       log_group_name: group_name,
+  #       log_stream_name: stream_name,
+  #       log_events: events
+  #   })
+  # end
+  #
+  # # @param [String] group_name Name of log group to replace the stream in
+  # # @param [String] stream_name Name of stream to replace or create
+  # # @param [Array] filenames List of paths to saved log files to load into stream
+  # # @param [Bool] replace Set to true to recreate stream instead of just appending events
+  # #
+  # # @return [Array] List of files that were successfully processed
+  # def upload_eventfiles_to_cloudwatch_stream(group_name, stream_name, filenames, replace: false)
+  #   processed = []
+  #
+  #   filenames.each do |filename|
+  #     events = load_events_from_file(filename)
+  #     events.length || next
+  #
+  #     if replace
+  #       delete_cloudwatch_stream(group_name, stream_name)
+  #     end
+  #
+  #     create_new_cloudwatch_stream(group_name, stream_name)
+  #
+  #     upload_events_to_cloudwatch_stream(group_name, stream_name, events)
+  #
+  #     processed << filename
+  #   end
+  #
+  #   processed
+  # end
 
   def delete_local_file(filename)
     log.info("rm #{filename.inspect}")
