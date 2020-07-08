@@ -133,22 +133,33 @@ class CloudScrub
   # @param [String] message Log line to filter
   # @param [String or Regex] scrub_gsub String (for plain match) or regex to filter
   #
-  # @return [String] Message with matching text removed
+  # @return [String, Bool] Message with matching text removed.  Last element is true
+  #                        if the message was altered.
   def scrub_message_by_gsub(message, scrub_gsub)
     # Apply regular expressions to a line allowing arbitrary changes to the
-    message.gsub(scrub_gsub, '')
+    nmessage = message.gsub(scrub_gsub, '')
+    [nmessage, nmessage != message]
   end
 
   # @param [String] message Event message
   # @param [Hash] jsonpaths Hash with keys of string JSON path
   #                         and values of matching JsonPath objects
-  #
-  # @return [String] Message with matching JSON elements removed
-  def scrub_message_by_jsonpaths(message, jsonpaths)
+  # @param [Bool] return_raw Return message as hash (decoded) instead
+  #                          of a re-encoded string
+  # @return [Array[String|Hash, Bool] Message with matching JSON elements removed
+  #                                   If return_raw is set it will be a JSON serializable
+  #                                   hash instead of encoded JSON if the message parses,
+  #                                   Second element is false if unchanged or true if filter
+  #                                   matched.
+  def scrub_message_by_jsonpaths(message, jsonpaths, return_raw: false)
     # Remove elements matching redact_paths from data, unless they match an
     # element in exclude_paths.  Use the jsonpath CLI tool to tune your
     # filters.
-    dirty = false
+    if jsonpaths.nil?
+      jsonpaths = []
+    end
+
+    changed = false
 
     begin
       # Build JSON parsed version of message
@@ -161,16 +172,20 @@ class CloudScrub
     jsonpaths.each do |path_string, path_obj|
       # Find then delete so we can avoid pointless reserialization
       unless path_obj.on(message).empty?
-        dirty = true
+        changed = true
         json_message = json_message.delete(path_string)
       end
     end
 
-    if dirty
+    if return_raw
+      return [json_message.to_hash, changed]
+    end
+  
+    if changed
       message = json_message.to_hash.to_json(ascii_only: true)
     end
 
-    message
+    [message, changed]
   end
 
   # @param [Integer] ms_timestamp Milliseconds since epoch
@@ -271,6 +286,7 @@ class CloudScrub
   #                               subfolder based on first log line
   # @param [String or Regex] scrub_gsub gsub expression to filter from logs
   # @param [Array] scrub_jsonpaths List of JSONPath expressions to delete from logs
+  # @param [Bool] nest_json Set to true to nest message JSON instead of escaping
   # @return [Hash] A hash with the following items:
   #                - filenames - Array of saved files from the stream
   #                - event_count - Integer count of events in stream
@@ -284,8 +300,9 @@ class CloudScrub
     local_dir: '.',
     split_bytes: nil,
     date_subfolders: true,
+    scrub_gsub: nil,
     scrub_jsonpaths: nil,
-    scrub_gsub: nil
+    nest_json: true
   )
     # Why is this method all jumbled together?  We don't want PII to hit the
     # filesystem, so we need to scrub before writing.  HOWEVER we also need
@@ -312,21 +329,24 @@ class CloudScrub
       message = event.message
       message_size = message.bytesize
       in_bytes += message_size
+      changes = false
 
-      # Apply JSON Path filter
-      if !scrub_jsonpaths.nil?
-        message = scrub_message_by_jsonpaths(message, jsonpaths)
-      end
-
-      # Apply gsub filter second to reduce chance of JSON breaking
+      # Apply gsub filter
       if !scrub_gsub.nil?
-        message = scrub_message_by_gsub(message, scrub_gsub)
+        message, changed = scrub_message_by_gsub(message, scrub_gsub)
+        changes |= changed
       end
-
-      out_bytes += message.bytesize
+      
+      # Decode JSON and apply JSON Path filter
+      if nest_json || !scrub_jsonpaths.nil?
+        message, changed = scrub_message_by_jsonpaths(message, scrub_jsonpaths, return_raw: nest_json)
+        changes |= changed
+      end
 
       # Transform the event into a logstash/syslog like format
       output_data = serialize_event(event.timestamp, group_name, stream_name, message)
+
+      out_bytes += output_data.bytesize
 
       # TODO - File writer should be its own generator
       # Open a new file if no file yet or if we would exceed the split size
@@ -364,7 +384,7 @@ class CloudScrub
       cur_file_bytes += output_data.bytesize
 
       event_count += 1
-      message_size != message.bytesize and scrubbed_count += 1
+      changes && scrubbed_count += 1
     end
 
     log.info("Wrote #{event_count} events (#{scrubbed_count} scrubbed) to #{filenames.length} files")

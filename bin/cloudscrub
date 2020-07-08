@@ -79,6 +79,11 @@ Options:
     opts.on('-j', '--scrub-jsonpath JSONPATH',
             'One or more JSON Paths (space separated) to redact from logs') do |jsonpaths|
       options[:scrub_jsonpaths] = jsonpaths.split(' ')
+      options[:force_json] = true
+    end
+
+    opts.on('-J', '--force-json', 'Treat lines as JSON (Automaticly enabled if -j JSONPATH is set)') do
+      options[:force_json] = true
     end
 
     opts.on('-g', '--scrub-gsub PATTERN', 'Ruby gsub (plain or regex) to redact from logs') do |pattern|
@@ -227,8 +232,10 @@ Options:
                                                            local_dir: options[:local_dir],
                                                            split_bytes: options[:split_bytes],
                                                            date_subfolders: options[:date_subfolders],
+                                                           scrub_gsub: options[:scrub_gsub],
                                                            scrub_jsonpaths: options[:scrub_jsonpaths],
-                                                           scrub_gsub: options[:scrub_gsub])
+                                                           nest_json: options[:force_json],
+                                                          )
 
       # Stash clean logs in S3
       unless options[:s3_url].nil?
@@ -246,8 +253,8 @@ Options:
         
       end
 
-      # Delete local after processing
-      if options[:keep].nil?
+      # Delete local after processing unless we have no destination or are asked to keep
+      if options[:keep].nil? && !options[:s3_url].nil?
         results[stream_name][:filenames].each do |filename|
           File.exist?(filename) && cs.delete_local_file(filename)
         end

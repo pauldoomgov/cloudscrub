@@ -10,29 +10,50 @@ RSpec.describe CloudScrub do
   cs = CloudScrub.new
 
   it 'scrubs messages by gsub literal' do
-    expect(cs.scrub_message_by_gsub('this is IT!', '')).to eq('this is IT!')
-    expect(cs.scrub_message_by_gsub('this is IT!', 'is')).to eq('th  IT!')
-    expect(cs.scrub_message_by_gsub('this is IT!', 'It')).to eq('this is IT!')
+    expect(cs.scrub_message_by_gsub('this is IT!', '')).to eq(['this is IT!', false])
+    expect(cs.scrub_message_by_gsub('this is IT!', 'is')).to eq(['th  IT!', true])
+    expect(cs.scrub_message_by_gsub('this is IT!', 'It')).to eq(['this is IT!', false])
   end
 
   it 'scrubs messages by gsub regex' do
-    expect(cs.scrub_message_by_gsub(' Where is my hammer? ', /(^\s+)|(\s+$)/)).to eq('Where is my hammer?')
-    expect(cs.scrub_message_by_gsub(' Where is my hammer? ', /er/)).to eq(' Whe is my hamm? ')
-    expect(cs.scrub_message_by_gsub(' Where is my hammer? ', /[^\w]+/)).to eq('Whereismyhammer')
+    expect(cs.scrub_message_by_gsub(' Where is my hammer? ', /(^\s+)|(\s+$)/)).to eq(['Where is my hammer?', true])
+    expect(cs.scrub_message_by_gsub(' Where is my hammer? ', /er/)).to eq([' Whe is my hamm? ', true])
+    expect(cs.scrub_message_by_gsub(' Where is my hammer? ', /[^\w]+/)).to eq(['Whereismyhammer', true])
   end
 
+  sample_js = '{"fried": true, "salt": "+++", "secret_ingredients": ["artichoke", "tumeric", "rats"]}'
+
   it 'scrubs valid JSON by JSONPath' do
-    js = '{"fried": true, "salt": "+++", "secret_ingredients": ["artichoke", "tumeric", "rats"]}'
-    expect(cs.scrub_message_by_jsonpaths(js, [])).to eq(js)
+    expect(cs.scrub_message_by_jsonpaths(sample_js, [])).to eq([sample_js, false])
     
-    jshash = JSON.parse(js)
+    jshash = JSON.parse(sample_js)
     jshash.delete('salt')
     jp = ['$..salt'].map { |p| [p, JsonPath.new(p)] }.to_h
-    expect(JSON.parse(cs.scrub_message_by_jsonpaths(js, jp))).to eq(jshash)
+    message, changed = cs.scrub_message_by_jsonpaths(sample_js, jp)
+    expect(JSON.parse(message)).to eq(jshash)
+    expect(changed).to eq(true)
 
     jshash.delete('secret_ingredients')
     jp = ['$..salt', '$..secret_ingredients'].map { |p| [p, JsonPath.new(p)] }.to_h
-    expect(JSON.parse(cs.scrub_message_by_jsonpaths(js, jp))).to eq(jshash)
+    message, changed = cs.scrub_message_by_jsonpaths(sample_js, jp)
+    expect(JSON.parse(message)).to eq(jshash)
+    expect(changed).to eq(true)
+
+    # Second round with raw output
+    jshash = JSON.parse(sample_js)
+    expect(cs.scrub_message_by_jsonpaths(sample_js, [], return_raw: true)).to eq([jshash, false])
+
+    jshash.delete('salt')
+    jp = ['$..salt'].map { |p| [p, JsonPath.new(p)] }.to_h
+    message, changed = cs.scrub_message_by_jsonpaths(sample_js, jp, return_raw: true)
+    expect(message).to eq(jshash)
+    expect(changed).to eq(true)
+
+    jshash.delete('secret_ingredients')
+    jp = ['$..salt', '$..secret_ingredients'].map { |p| [p, JsonPath.new(p)] }.to_h
+    message, changed = cs.scrub_message_by_jsonpaths(sample_js, jp, return_raw: true)
+    expect(message).to eq(jshash)
+    expect(changed).to eq(true)
   end
 
   it 'converts epoch ms to ISO8601 time'  do
@@ -61,16 +82,23 @@ RSpec.describe CloudScrub do
       'junkhost',
       'WARNING: Garbage')
     ).to eq("{\"@timestamp\":\"2500-12-31T23:59:59.000Z\",\"type\":\"cw_/var/garbage/log\",\"host\":{\"name\":\"junkhost\"},\"events\":\"WARNING: Garbage\"}\n")
+    
+    expect(cs.serialize_event(
+      16756761599000,
+      '/var/garbage/log',
+      'junkhost',
+      JSON.parse(sample_js)
+    )).to eq("{\"@timestamp\":\"2500-12-31T23:59:59.000Z\",\"type\":\"cw_/var/garbage/log\",\"host\":{\"name\":\"junkhost\"},\"events\":{\"fried\":true,\"salt\":\"+++\",\"secret_ingredients\":[\"artichoke\",\"tumeric\",\"rats\"]}}\n")
   end
 
   it 'deserializes events' do
     expect(cs.deserialize_event(
-      "{\"@timestamp\":\"2500-12-31T23:59:59.000Z\",\"type\":\"cw_/var/garbage/log\",\"host\":{\"name\":\"junkhost\"},\"events\":\"{\\\"nested\\\": true}\"}\n"
+      "{\"@timestamp\":\"2500-12-31T23:59:59.000Z\",\"type\":\"cw_/var/garbage/log\",\"host\":{\"name\":\"junkhost\"},\"events\":{\"fried\":true,\"salt\":\"+++\",\"secret_ingredients\":[\"artichoke\",\"tumeric\",\"rats\"]}}\n"
     )).to eq([
       "2500-12-31T23:59:59.000Z",
       "/var/garbage/log",
       "junkhost",
-      "{\"nested\": true}"
+      JSON.parse(sample_js)
     ])
   end
 end
