@@ -1,6 +1,7 @@
 #!/usr/bin/env ruby
 
 require 'bundler/setup'
+require 'filesize'
 require 'logger'
 require 'optionparser'
 require 'cloudscrub'
@@ -72,8 +73,9 @@ Options:
     end
 
     opts.on('-Z', '--split-bytes SIZE',
-            'Split output files into chunks <= SIZE bytes.') do |val|
-      options[:split_bytes] = Integer(val)
+            'Split output files into chunks <= SIZE - Accepts units like MB or GB') do |val|
+      options[:split_bytes] = Filesize.from(val).to_i
+      STDERR.puts("\nWill split files at #{options[:split_bytes]} bytes")
     end
 
     opts.on('-j', '--scrub-jsonpath JSONPATH',
@@ -287,8 +289,8 @@ Options:
   file_count = results.map { |_, s| s[:filenames].length }.sum
   event_count = results.map { |_, s| s[:event_count] }.sum
   scrubbed_count = results.map { |_, s| s[:scrubbed_count] }.sum
-  in_bytes = cs.humansize(results.map { |_, s| s[:in_bytes] }.sum)
-  out_bytes = cs.humansize(results.map { |_, s| s[:out_bytes] }.sum)
+  in_bytes = Filesize.new(results.map { |_, s| s[:in_bytes] }.sum).pretty
+  out_bytes = Filesize.new(results.map { |_, s| s[:out_bytes] }.sum).pretty
 
   cs.log.info("#{stream_names.length} streams processed into #{file_count} files with #{event_count} events " +
               "(#{scrubbed_count} scrubbed) - #{in_bytes} read, #{out_bytes} written")
