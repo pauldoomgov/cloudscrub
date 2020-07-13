@@ -339,7 +339,7 @@ class CloudScrub
       
       # Decode JSON and apply JSON Path filter
       if nest_json || !scrub_jsonpaths.nil?
-        message, changed = scrub_message_by_jsonpaths(message, scrub_jsonpaths, return_raw: nest_json)
+        message, changed = scrub_message_by_jsonpaths(message, jsonpaths, return_raw: nest_json)
         changes |= changed
       end
 
