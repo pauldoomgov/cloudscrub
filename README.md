@@ -1,28 +1,21 @@
 # Cloudscrub
 
-Welcome to your new gem! In this directory, you'll find the files you need to be able to package up your Ruby library into a gem. Put your Ruby code in the file `lib/cloudscrub`. To experiment with that code, run `bin/console` for an interactive prompt.
-
-TODO: Delete this and the text above, and describe your gem
+Tool for downloading, scrubbing, and saving CloudWatch log streams.  Can be used
+for safe archiving or removing logs with sensitive data.
 
 ## Installation
 
-Add this line to your application's Gemfile:
+Requires Ruby 2.7 and Bundler.
 
-```ruby
-gem 'cloudscrub'
-```
-
-And then execute:
+Install required Gems:
 
     $ bundle install
 
-Or install it yourself as:
-
-    $ gem install cloudscrub
+Verify installation by running `bin/cloudscrub`
 
 ## Usage
 
-TODO: Write usage instructions here
+Run `bin/cloudscrub` for usage.
 
 ## Development
 
@@ -33,4 +26,3 @@ To install this gem onto your local machine, run `bundle exec rake install`. To 
 ## Contributing
 
 Bug reports and pull requests are welcome on GitHub at https://github.com/[USERNAME]/cloudscrub.
-

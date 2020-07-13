@@ -19,16 +19,31 @@ def main
 usage: #{File.basename($0)} [OPTIONS] LOG_GROUP_NAME
 
 Download all CloudWatch Logs for the specified time window from the specified log group,
-and upload them to LOG_BUCKET_NAME, then delete the original log stream,
-
-The current working directory will be used for temporary storage of the log
-files, which may be very large!
+and upload them to LOG_BUCKET_NAME, then delete the original log stream, The current 
+directory will be used for temporary storage of the log files, which may be very large!
 
 Filtering is applied per-log line.  Only one regex filter may be specified and should
-be in the form of a search/replace.  Due to the flexibility of PCRE, this should cover most
-scrubbing scenarios.  Multiple JSON Path filters may be specified.  If a JSON Path filter
-is set the log line will be parsed as JSON and all elements mathing a JSON Path filter
-will be removed from the output.
+be in the form of a search/replace.  Multiple JSON Path filters may be specified.  If a
+JSON Path filter is set the log line will be parsed as JSON and all elements matching a
+JSON Path filter will be removed from the output.
+
+Examples:
+
+# List streams in the /var/log/messages group with events between 2020-01-01 and
+# 2020-01-14 23:59 and save in ./streamset
+$0 -s 2020-01-01 -e 2020-01-14T2359 -l -f ./streamset /var/log/messages
+
+# Download streams from /var/log/messages listed in streamset and save to /var/tmp/logdump
+$0 -f ./streamset -d /var/tmp/cwdump -D /var/log/messages
+
+# + Save to a S3 bucket named mylogpile under the path logarch/jan:
+$0 -f ./streamset -d /var/tmp/cwdump -D -b mylogpile/logarch /var/log/messages
+
+# + Scrub the words "socks" and "hats" as well as the subkey '.clothes' from JSON format logs
+$0 -f ./streamset -d /var/tmp/cwdump -D -b mylogpile/logarch -g '/socks|hats/' -j '$..clothes' /var/log/messages
+
+# Same, but delete the source streams where one or more lines match the filters
+$0 -f ./streamset -d /var/tmp/cwdump -D -b mylogpile/logarch -g '/socks|hats/' -j '$..clothes' /var/log/messages
 
 Options:
     EOM
@@ -54,6 +69,11 @@ Options:
 
     opts.on('-d', '--local-dir DIRECTORY', 'Local directory to save logs under') do |local_dir|
       options[:local_dir] = local_dir
+    end
+
+    opts.on('-D', '--date-subfolders',
+      'Place downloaded and S3 streams under YYYY-MM-DD subfolders') do
+      options[:date_subfolders] = true
     end
 
     opts.on('-f', '--stream-file FILE',
@@ -99,11 +119,6 @@ Options:
     opts.on('-b', '--s3-url URL',
             'S3 URL to store copies of scrubbed logs in') do |s3_url|
       options[:s3_url] = s3_url
-    end
-
-    opts.on('-D', '--date-subfolders',
-            'Place downloaded and S3 streams under YYYY-MM-DD subfolders') do
-      options[:date_subfolders] = true
     end
 
     opts.on('--delete', 'Delete stream from CloudWatch once scrubbed version is uploaded to S3') do
