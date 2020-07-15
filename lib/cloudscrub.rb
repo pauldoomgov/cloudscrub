@@ -73,18 +73,21 @@ class CloudScrub
   # @return [Aws::CloudWatchLogs::Client] On-demand initialized CloudWatch
   #                                       client for reading (ignores dry_run)
   def cloudwatch_client_ro
-    @cloudwatch_client_ro ||= Aws::CloudWatchLogs::Client.new
+    @cloudwatch_client_ro ||= Aws::CloudWatchLogs::Client.new(retry_mode: 'adaptive')
   end
 
   # @return [Aws::CloudWatchLogs::Client] On-demand initialized CloudWatch
   #                                       client for writing (honors dry_run)
   def cloudwatch_client_rw
-    @cloudwatch_client_rw ||= Aws::CloudWatchLogs::Client.new(stub_responses: @dry_run)
+    @cloudwatch_client_rw ||= Aws::CloudWatchLogs::Client.new(
+      retry_mode: 'adaptive',
+      stub_responses: @dry_run
+    )
   end
 
   # @return [Aws::S3::Client] On-demand initialized S3 client (honors dry_run)
   def s3_client
-    @s3_client ||= Aws::S3::Client.new(stub_responses: @dry_run)
+    @s3_client ||= Aws::S3::Client.new(retry_mode: 'adaptive', stub_responses: @dry_run)
   end
 
   # @param [String] group_name CloudWatch log group
