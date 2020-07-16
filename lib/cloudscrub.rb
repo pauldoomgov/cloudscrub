@@ -275,16 +275,27 @@ class CloudScrub
       return to_enum(:each_log_event_in_stream, stream_name, start_time:
                      start_time, end_time: end_time)
     end
-    cloudwatch_client_ro.get_log_events(
-      log_group_name: group_name,
-      log_stream_name: stream_name,
-      start_from_head: true,
-      start_time: nil,
-      end_time: nil
-    ).each do |resp|
+
+    next_token = "start"
+    next_forward_token = nil
+
+    # Loops through 1MB chunks till the end...
+    while next_forward_token != next_token do
+      next_token = next_forward_token
+
+      resp = cloudwatch_client_ro.get_log_events(
+        log_group_name: group_name,
+        log_stream_name: stream_name,
+        start_from_head: true,
+        start_time: nil,
+        end_time: nil,
+        next_token: next_token
+      )
       resp.events.each do |event|
         yield event
       end
+      
+      next_forward_token = resp.next_forward_token
     end
   end
 

@@ -270,7 +270,7 @@ Options:
       if options[:delete] || (options[:delete_matching] && results[stream_name][:scrubbed_count] > 0)
         cs.delete_cloudwatch_stream(group_name, stream_name)
       elsif options[:delete_matching] && results[stream_name][:scrubbed_count] == 0
-        cs.log.info("No matching events in \"#{group_name}/#{stream_name}\"")
+        cs.log.info("No matching events in \"#{group_name}:#{stream_name}\"")
       else
         
       end
