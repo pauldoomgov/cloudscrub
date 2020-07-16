@@ -21,24 +21,38 @@ RSpec.describe CloudScrub do
     expect(cs.scrub_message_by_gsub(' Where is my hammer? ', /[^\w]+/)).to eq(['Whereismyhammer', true])
   end
 
-  sample_js = '{"fried": true, "salt": "+++", "secret_ingredients": ["artichoke", "tumeric", "rats"]}'
+  # JSON log fixture used for the remainder of tests
+  sample_js = '{"fried": true, "salt": "+++", "secret_ingredients": ["artichoke", "tumeric", "rats"],'\
+              ' "chunks": {"big": 5, "medium": 2, "small": 100}}'
 
   it 'scrubs valid JSON by JSONPath' do
     expect(cs.scrub_message_by_jsonpaths(sample_js, [])).to eq([sample_js, false])
     
+    # Test removing a single key
     jshash = JSON.parse(sample_js)
     jshash.delete('salt')
+    # Build the path name to JsonPath object map
     jp = ['$..salt'].map { |p| [p, JsonPath.new(p)] }.to_h
     message, changed = cs.scrub_message_by_jsonpaths(sample_js, jp)
     expect(JSON.parse(message)).to eq(jshash)
     expect(changed).to eq(true)
 
+    # Test removing two keys
     jshash.delete('secret_ingredients')
     jp = ['$..salt', '$..secret_ingredients'].map { |p| [p, JsonPath.new(p)] }.to_h
     message, changed = cs.scrub_message_by_jsonpaths(sample_js, jp)
     expect(JSON.parse(message)).to eq(jshash)
     expect(changed).to eq(true)
 
+    # Test a more complex path - Single item matching multiple subkeys
+    jshash = JSON.parse(sample_js)
+    jshash['chunks'].delete('big')
+    jshash['chunks'].delete('small')
+    jp = ['$..chunks.["big","small"]'].map { |p| [p, JsonPath.new(p)] }.to_h
+    message, changed = cs.scrub_message_by_jsonpaths(sample_js, jp)
+    expect(JSON.parse(message)).to eq(jshash)
+    expect(changed).to eq(true)
+ 
     # Second round with raw output
     jshash = JSON.parse(sample_js)
     expect(cs.scrub_message_by_jsonpaths(sample_js, [], return_raw: true)).to eq([jshash, false])
@@ -88,13 +102,12 @@ RSpec.describe CloudScrub do
       '/var/garbage/log',
       'junkhost',
       JSON.parse(sample_js)
-    )).to eq("{\"@timestamp\":\"2500-12-31T23:59:59.000Z\",\"type\":\"cw_/var/garbage/log\",\"host\":{\"name\":\"junkhost\"},\"events\":{\"fried\":true,\"salt\":\"+++\",\"secret_ingredients\":[\"artichoke\",\"tumeric\",\"rats\"]}}\n")
+    )).to eq("{\"@timestamp\":\"2500-12-31T23:59:59.000Z\",\"type\":\"cw_/var/garbage/log\",\"host\":{\"name\":\"junkhost\"},\"events\":{\"fried\":true,\"salt\":\"+++\",\"secret_ingredients\":[\"artichoke\",\"tumeric\",\"rats\"],\"chunks\":{\"big\":5,\"medium\":2,\"small\":100}}}\n")
   end
 
   it 'deserializes events' do
     expect(cs.deserialize_event(
-      "{\"@timestamp\":\"2500-12-31T23:59:59.000Z\",\"type\":\"cw_/var/garbage/log\",\"host\":{\"name\":\"junkhost\"},\"events\":{\"fried\":true,\"salt\":\"+++\",\"secret_ingredients\":[\"artichoke\",\"tumeric\",\"rats\"]}}\n"
-    )).to eq([
+      "{\"@timestamp\":\"2500-12-31T23:59:59.000Z\",\"type\":\"cw_/var/garbage/log\",\"host\":{\"name\":\"junkhost\"},\"events\":{\"fried\":true,\"salt\":\"+++\",\"secret_ingredients\":[\"artichoke\",\"tumeric\",\"rats\"],\"chunks\":{\"big\":5,\"medium\":2,\"small\":100}}}\n")).to eq([
       "2500-12-31T23:59:59.000Z",
       "/var/garbage/log",
       "junkhost",

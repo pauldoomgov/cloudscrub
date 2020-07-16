@@ -14,9 +14,10 @@ def main
   options[:log_level] = Logger::INFO
   options[:dry_run] = false
 
+  myname = File.basename($0)
   optparse = OptionParser.new do |opts|
     opts.banner = <<-EOM
-usage: #{File.basename($0)} [OPTIONS] LOG_GROUP_NAME
+usage: #{myname} [OPTIONS] LOG_GROUP_NAME
 
 Download all CloudWatch Logs for the specified time window from the specified log group,
 and upload them to LOG_BUCKET_NAME, then delete the original log stream, The current 
@@ -26,24 +27,28 @@ Filtering is applied per-log line.  Only one regex filter may be specified and s
 be in the form of a search/replace.  Multiple JSON Path filters may be specified.  If a
 JSON Path filter is set the log line will be parsed as JSON and all elements matching a
 JSON Path filter will be removed from the output.
+See https://goessner.net/articles/JsonPath/ for more on JSON Path.  Experiment with
+it here: http://jsonpath.com/
 
 Examples:
 
 # List streams in the /var/log/messages group with events between 2020-01-01 and
-# 2020-01-14 23:59 and save in ./streamset
-$0 -s 2020-01-01 -e 2020-01-14T2359 -l -f ./streamset /var/log/messages
+# 2020-01-14 23:59 and save in ./slist
+#{myname} -s 2020-01-01 -e 2020-01-14T2359 -l -f ./slist /var/log/messages
 
-# Download streams from /var/log/messages listed in streamset and save to /var/tmp/logdump
-$0 -f ./streamset -d /var/tmp/cwdump -D /var/log/messages
+# Download streams from /var/log/messages listed in streamset and save to the
+# directory./cwdump
+#{myname} -f ./slist -d ./cwdump -D /var/log/messages
 
-# + Save to a S3 bucket named mylogpile under the path logarch/jan:
-$0 -f ./streamset -d /var/tmp/cwdump -D -b mylogpile/logarch /var/log/messages
+# + Save to a S3 bucket named mylogs under the path arch/:
+#{myname} -f ./slist -d ./cwdump -D -b mylogs/arch /var/log/messages
 
-# + Scrub the words "socks" and "hats" as well as the subkey '.clothes' from JSON format logs
-$0 -f ./streamset -d /var/tmp/cwdump -D -b mylogpile/logarch -g '/socks|hats/' -j '$..clothes' /var/log/messages
+# + Scrub the words "socks" and "hats" as well as the keys ["clothes"]["shirt"] and 
+#   ["clothes"]["vest"] from JSON format logs
+#{myname} -f ./slist -d ./cwdump -D -b mylogs/arch -g '/socks|hats/' -j '$..clothes.["shirt","vest"]' /var/log/messages
 
 # Same, but delete the source streams where one or more lines match the filters
-$0 -f ./streamset -d /var/tmp/cwdump -D -b mylogpile/logarch -g '/socks|hats/' -j '$..clothes' /var/log/messages
+#{myname} -f ./slist -d ./cwdump -D -b mylogs/arch -g '/socks|hats/' -j '$..clothes.["shirt","vest"]' /var/log/messages
 
 Options:
     EOM

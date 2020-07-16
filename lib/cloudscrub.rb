@@ -73,7 +73,15 @@ class CloudScrub
   # @return [Aws::CloudWatchLogs::Client] On-demand initialized CloudWatch
   #                                       client for reading (ignores dry_run)
   def cloudwatch_client_ro
-    @cloudwatch_client_ro ||= Aws::CloudWatchLogs::Client.new(retry_mode: 'adaptive')
+    # The read and describe API call rates are tiny.  This should help avoid getting
+    # throttled to death. https://www.awsarchitectureblog.com/2015/03/backoff.html
+    @cloudwatch_client_ro ||= Aws::CloudWatchLogs::Client.new(
+      retry_mode: 'legacy',
+      retry_base_delay: 0.5,
+      retry_max_delay: 30.0,
+      retry_jitter: :full,
+      retry_limit: 10
+    )
   end
 
   # @return [Aws::CloudWatchLogs::Client] On-demand initialized CloudWatch
